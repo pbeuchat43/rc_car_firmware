@@ -1,0 +1,4 @@
+#pragma once
+#define RC_BOARD "@PICO_BOARD@"
+#define RC_BUILD_ID "@RC_BUILD_ID@"
+#define RC_PROFILE_ID "@RC_PROFILE_ID@"

@@ -1,0 +1,39 @@
+name: Verify
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build/native -DRC_CAR_NATIVE_TESTS=ON
+      - run: cmake --build build/native --parallel 2
+      - run: ctest --test-dir build/native --output-on-failure
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision pinned SDK and picotool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+          git clone --depth 1 --branch 2.3.1 https://github.com/raspberrypi/pico-sdk.git build/pico-sdk
+          git -C build/pico-sdk submodule update --init --depth 1 lib/tinyusb
+          git clone --depth 1 --branch 2.3.1 https://github.com/raspberrypi/picotool.git build/picotool
+          cmake -S build/picotool -B build/picotool-build -G Ninja \
+            -DPICO_SDK_PATH="$PWD/build/pico-sdk" -DPICOTOOL_NO_LIBUSB=1 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/picotool-install"
+          cmake --build build/picotool-build --parallel 2
+          cmake --install build/picotool-build
+      - name: Build both UF2 bundles
+        run: |
+          for mcu in rp2040 rp2350; do
+            cmake -S . -B "build/$mcu" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DPICO_SDK_PATH="$PWD/build/pico-sdk" \
+              -Dpicotool_DIR="$PWD/build/picotool-install/lib/cmake/picotool" \
+              -DPICO_BOARD="waveshare_${mcu}_zero" \
+              -DRC_CAR_PROFILE="$PWD/profiles/research_car.example.hpp"
+            cmake --build "build/$mcu" --target rc_car_firmware_bundle --parallel 2
+          done
