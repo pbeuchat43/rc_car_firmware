@@ -98,7 +98,7 @@ void choices() {
     CHECK(c.status().generation != old && c.status().reason == Reason::wait_drive && !c.status().selected_drive);
 }
 
-void bench_and_pan() {
+void maintenance_and_pan() {
     Control c(profile);
     c.tick(150);
     arm(c);
@@ -116,7 +116,7 @@ void bench_and_pan() {
     CHECK(c.status().pan_pwm == 600 && c.status().pan_seq == 0);
     CHECK(c.request({{}, 0, Mode::hold}) == Code::ok);
     const auto request = [&](Operation op, uint16_t pulse = 0) {
-        return c.bench({{}, c.status().generation, op, pulse});
+        return c.maintenance({{}, c.status().generation, op, pulse});
     };
     CHECK(request(Operation::enter) == Code::conflict);
     c.tick(600);
@@ -180,6 +180,25 @@ void session() {
         Mode::automatic, Choice::host, Choice::host}, line), 2);
     Fields stale(result.view().substr(0, result.size - 1));
     CHECK(read(stale, r) && r.code == Code::stale);
+
+    const auto admitted = [&](auto message) {
+        const auto response = d.receive(packet(message, line), 2);
+        CHECK(response.size > 0);
+        Fields reply(response.view().substr(0, response.size - 1));
+        CHECK(read(reply, r) && r.code == Code::ok);
+    };
+    d.status_sent(300);
+    admitted(ModeRequest{{second_session, 1, 300}, d.status().generation, Mode::hold});
+    d.tick(360);
+    d.status_sent(360);
+    admitted(Maintenance{{second_session, 2, 360}, d.status().generation, Operation::enter, 0});
+    CHECK(d.status().mode == Mode::maintenance);
+    d.tick(420);
+    d.status_sent(420);
+    admitted(Maintenance{{second_session, 3, 420}, d.status().generation, Operation::pulse, 1700});
+    CHECK(d.status().drive_pwm == 1700);
+    d.tick(920);
+    CHECK(d.status().mode == Mode::hold && d.status().reason == Reason::maintenance_timeout);
 }
 
 std::string fixture(const std::string &dir, Text name) {
@@ -192,6 +211,32 @@ void codec(const std::string &dir) {
     CHECK(crc32("123456789") == 0xcbf43926u);
     CHECK(encode(Hello{challenge}).view() == fixture(dir, "hello"));
     CHECK(encode(Drive{{challenge, 2, 1234}, 7, -2500, 500}).view() == fixture(dir, "drive"));
+    CHECK(encode(Maintenance{{challenge, 3, 1234}, 7, Operation::pulse, 1700}).view() ==
+        fixture(dir, "maintenance"));
+    Fields previous("@RC1,HELLO,0123456789ABCDEF,8E3CC87C");
+    Hello hello;
+    CHECK(!read(previous, hello));
+    const auto old_operation = Writer{}.frame("BENCH", challenge, 3u, 7u, 1234u, Operation::pulse, 1700u);
+    Fields previous_operation(old_operation.view().substr(0, old_operation.size - 1));
+    Maintenance maintenance;
+    CHECK(!read(previous_operation, maintenance));
+
+    Status largest{};
+    largest.session = challenge;
+    largest.tick = largest.generation = largest.cancel_generation = UINT64_MAX;
+    largest.mode = Mode::maintenance;
+    largest.reason = largest.cancel_reason = Reason::maintenance_timeout;
+    largest.rc = Rc::unknown;
+    largest.valid_axes = largest.saturated = 3;
+    largest.drive_choice = largest.steer_choice = largest.drive_source = largest.steer_source = Choice::host;
+    largest.accepted_drive = largest.selected_drive = largest.pan_seq = UINT32_MAX;
+    largest.rc_drive = largest.rc_steer = largest.drive_pwm = largest.steer_pwm = largest.pan_pwm = UINT16_MAX;
+    const auto wide_status = encode(largest);
+    CHECK(wide_status.size > 0 && wide_status.size <= max_frame);
+    Fields wide_fields(wide_status.view().substr(0, wide_status.size - 1));
+    Status parsed{};
+    CHECK(read(wide_fields, parsed) && parsed.mode == Mode::maintenance &&
+        parsed.reason == Reason::maintenance_timeout && parsed.tick == UINT64_MAX);
     Stream stream;
     const auto valid_line = fixture(dir, "drive");
     for (char ch : std::string(max_frame + 2, 'X') + "\n") CHECK(stream.push(ch, 0).empty());
@@ -226,7 +271,7 @@ int main(int argc, char **argv) {
     codec(argv[1]);
     quality_and_handover();
     choices();
-    bench_and_pan();
+    maintenance_and_pan();
     session();
-    std::cout << "RC1 codec, handover, axis choices, maintenance and session checks passed\n";
+    std::cout << "RCPv1 codec, handover, axis choices, maintenance and session checks passed\n";
 }

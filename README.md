@@ -1,6 +1,6 @@
 # RC car firmware
 
-Pico firmware for an RC-style drive ESC, steering servo and research camera pan servo. It owns the actuator source selection, receiver handover and command deadlines. See the [design](docs/design.md) and [RC1 protocol](docs/rc1.md).
+Pico firmware for an RC-style drive ESC, steering servo and research camera pan servo. It owns the actuator source selection, receiver handover and command deadlines. It speaks [RC Car Protocol v1 (RCPv1)](docs/rcpv1.md) over USB. See the [design](docs/design.md).
 
 ## Build
 

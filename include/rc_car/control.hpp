@@ -17,7 +17,7 @@ struct OutputProfile {
 struct Profile {
     InputProfile drive_in, steer_in;
     OutputProfile drive, steer, pan;
-    uint16_t width_min, width_max, period_min, period_max, bench_min, bench_max;
+    uint16_t width_min, width_max, period_min, period_max, maintenance_min, maintenance_max;
     uint16_t pan_delay_ms;
 };
 constexpr uint64_t pwm_ms = 20;
@@ -25,9 +25,9 @@ constexpr uint64_t rc_timeout_ms = 100;
 constexpr uint64_t rc_baseline_ms = 150;
 constexpr uint64_t drive_timeout_ms = 100;
 constexpr uint64_t first_drive_ms = 500;
-constexpr uint64_t bench_lease_ms = 500;
-constexpr uint64_t bench_dwell_ms = 15000;
-constexpr uint64_t bench_max_ms = 120000;
+constexpr uint64_t maintenance_lease_ms = 500;
+constexpr uint64_t maintenance_dwell_ms = 15000;
+constexpr uint64_t maintenance_max_ms = 120000;
 // Include a frame for asynchronous staging before counting two complete frames.
 constexpr uint64_t two_frames_ms = 3 * pwm_ms;
 
@@ -41,7 +41,7 @@ constexpr bool valid(Profile p) {
     };
     return input(p.drive_in) && input(p.steer_in) && output(p.drive) && output(p.steer) && output(p.pan) &&
         p.period_min > p.width_max && p.period_min <= p.period_max && p.period_max < rc_timeout_ms * 1000 &&
-        p.bench_min >= 400 && p.bench_min <= p.drive.min && p.bench_max >= p.drive.max && p.bench_max <= 2600;
+        p.maintenance_min >= 400 && p.maintenance_min <= p.drive.min && p.maintenance_max >= p.drive.max && p.maintenance_max <= 2600;
 }
 
 struct Pulse {
@@ -135,11 +135,11 @@ public:
                 return update_pan();
             }
         }
-        if (mode_ == wire::Mode::bench &&
-            (now - bench_start_ >= bench_max_ms || now - bench_at_ >= bench_lease_ms ||
-             (bench_output_ != profile_.drive.center && now - nonneutral_at_ >= bench_dwell_ms) ||
-             !bench_rc_ok())) {
-            leave_bench(!bench_rc_ok() ? wire::Reason::bench_abort : wire::Reason::bench_timeout);
+        if (mode_ == wire::Mode::maintenance &&
+            (now - maintenance_start_ >= maintenance_max_ms || now - maintenance_at_ >= maintenance_lease_ms ||
+             (maintenance_output_ != profile_.drive.center && now - nonneutral_at_ >= maintenance_dwell_ms) ||
+             !maintenance_rc_ok())) {
+            leave_maintenance(!maintenance_rc_ok() ? wire::Reason::maintenance_abort : wire::Reason::maintenance_timeout);
         }
         if (mode_ == wire::Mode::neutral && both && fresh_drive && neutral(rc_drive_.width(), profile_.drive_in))
             change(wire::Mode::manual, !edge);
@@ -148,7 +148,7 @@ public:
 
     void link_lost() {
         if (mode_ == wire::Mode::automatic) cancel(wire::Reason::link_lost);
-        if (mode_ == wire::Mode::bench) leave_bench(wire::Reason::link_lost);
+        if (mode_ == wire::Mode::maintenance) leave_maintenance(wire::Reason::link_lost);
         accepted_drive_ = 0;
         pan_seq_ = 0;
         pan_pending_.reset();
@@ -161,7 +161,7 @@ public:
         if (m.mode != Mode::automatic && (m.drive != Choice::none || m.steer != Choice::none))
             return Code::bad_range;
         if (m.mode == Mode::hold) {
-            if (mode_ == Mode::bench) leave_bench(Reason::bench_abort);
+            if (mode_ == Mode::maintenance) leave_maintenance(Reason::maintenance_abort);
             else if (mode_ != Mode::hold) {
                 if (mode_ == Mode::automatic) record_cancel(Reason::requested);
                 change(Mode::hold);
@@ -169,7 +169,7 @@ public:
             }
             return Code::ok;
         }
-        if (mode_ == Mode::bench) return Code::conflict;
+        if (mode_ == Mode::maintenance) return Code::conflict;
         if (m.mode == Mode::manual) {
             if (mode_ == Mode::automatic) cancel(Reason::requested);
             else if (mode_ == Mode::hold) change(Mode::neutral);
@@ -200,40 +200,40 @@ public:
 
     wire::Code pan(const wire::Pan &p) {
         using namespace wire;
-        if (!valid_ || mode_ == Mode::bench) return Code::conflict;
+        if (!valid_ || mode_ == Mode::maintenance) return Code::conflict;
         if (!demand(p.demand)) return Code::bad_range;
         pan_pending_ = PanTarget{p.key.seq, p.demand};
         update_pan();
         return Code::ok;
     }
 
-    wire::Code bench(const wire::Bench &b) {
+    wire::Code maintenance(const wire::Maintenance &b) {
         using namespace wire;
         if (b.generation != generation_) return Code::wrong_generation;
         if (b.operation != Operation::pulse && b.pulse != 0) return Code::bad_range;
         if (!valid_) return Code::conflict;
         if (b.operation == Operation::enter) {
-            if (mode_ != Mode::hold || now_ - mode_since_ < two_frames_ms || !bench_rc_ok())
+            if (mode_ != Mode::hold || now_ - mode_since_ < two_frames_ms || !maintenance_rc_ok())
                 return Code::conflict;
-            change(Mode::bench);
-            bench_start_ = bench_at_ = neutral_at_ = now_;
-            bench_output_ = profile_.drive.center;
+            change(Mode::maintenance);
+            maintenance_start_ = maintenance_at_ = neutral_at_ = now_;
+            maintenance_output_ = profile_.drive.center;
             pan_pending_.reset();
             return Code::ok;
         }
-        if (mode_ != Mode::bench) return Code::conflict;
+        if (mode_ != Mode::maintenance) return Code::conflict;
         if (b.operation == Operation::exit || b.operation == Operation::abort) {
-            leave_bench(b.operation == Operation::exit ? Reason::requested : Reason::bench_abort);
+            leave_maintenance(b.operation == Operation::exit ? Reason::requested : Reason::maintenance_abort);
             return Code::ok;
         }
-        if (b.pulse < profile_.bench_min || b.pulse > profile_.bench_max) return Code::bad_range;
-        if (bench_output_ == profile_.drive.center && b.pulse != profile_.drive.center) {
+        if (b.pulse < profile_.maintenance_min || b.pulse > profile_.maintenance_max) return Code::bad_range;
+        if (maintenance_output_ == profile_.drive.center && b.pulse != profile_.drive.center) {
             if (now_ - neutral_at_ < two_frames_ms) return Code::conflict;
             nonneutral_at_ = now_;
         }
-        if (bench_output_ != profile_.drive.center && b.pulse == profile_.drive.center) neutral_at_ = now_;
-        bench_output_ = b.pulse;
-        bench_at_ = now_;
+        if (maintenance_output_ != profile_.drive.center && b.pulse == profile_.drive.center) neutral_at_ = now_;
+        maintenance_output_ = b.pulse;
+        maintenance_at_ = now_;
         return Code::ok;
     }
 
@@ -273,8 +273,8 @@ public:
                 s.drive_pwm = pwm(d.demand, profile_.drive);
                 s.steer_pwm = pwm(t.demand, profile_.steer);
             }
-        } else if (mode_ == Mode::bench) {
-            s.drive_pwm = bench_output_;
+        } else if (mode_ == Mode::maintenance) {
+            s.drive_pwm = maintenance_output_;
         } else if (mode_ == Mode::hold) {
             s.reason = valid_ ? hold_reason_ : Reason::fault;
         } else {
@@ -311,15 +311,15 @@ private:
         record_cancel(why, advance);
         change(wire::Mode::neutral, advance);
     }
-    bool bench_rc_ok() const {
+    bool maintenance_rc_ok() const {
         return !rc_drive_.good() || neutral(rc_drive_.width(), profile_.drive_in);
     }
-    void leave_bench(wire::Reason why) {
+    void leave_maintenance(wire::Reason why) {
         change(wire::Mode::hold);
         hold_reason_ = why;
     }
     void update_pan() {
-        if (!valid_ || mode_ == wire::Mode::bench || now_ - start_ < profile_.pan_delay_ms) return;
+        if (!valid_ || mode_ == wire::Mode::maintenance || now_ - start_ < profile_.pan_delay_ms) return;
         if (!pan_output_) {
             pan_output_ = profile_.pan.center;
             pan_center_at_ = now_;
@@ -343,8 +343,8 @@ private:
     std::optional<Target> target_;
     std::optional<PanTarget> pan_pending_;
     uint32_t accepted_drive_{}, pan_seq_{};
-    uint16_t pan_output_{}, bench_output_{};
-    uint64_t bench_start_{}, bench_at_{}, neutral_at_{}, nonneutral_at_{};
+    uint16_t pan_output_{}, maintenance_output_{};
+    uint64_t maintenance_start_{}, maintenance_at_{}, neutral_at_{}, nonneutral_at_{};
 };
 
 } // namespace rc_car

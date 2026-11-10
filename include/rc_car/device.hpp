@@ -45,8 +45,8 @@ public:
         if (ModeRequest mode; fields.type() == "MODE" && read(fields, mode)) {
             return reply(mode.key, [&](const auto &m) { return control_.request(m); }, mode);
         }
-        if (Bench bench; fields.type() == "BENCH" && read(fields, bench)) {
-            return reply(bench.key, [&](const auto &b) { return control_.bench(b); }, bench);
+        if (Maintenance maintenance; fields.type() == "MAINTENANCE" && read(fields, maintenance)) {
+            return reply(maintenance.key, [&](const auto &b) { return control_.maintenance(b); }, maintenance);
         }
         if (Drive drive; fields.type() == "DRIVE" && read(fields, drive)) {
             apply(drive.key, [&] { return control_.drive(drive); });
